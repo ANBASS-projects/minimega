@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -34,7 +35,17 @@ type DiskInfo struct {
 	VirtualSize string
 	DiskSize    string
 	BackingFile string
+	FileSystem  string
 }
+
+type FSType string
+
+const (
+	LVM  FSType = "lvm"
+	ZFS  FSType = "zfs"
+	EXT4 FSType = "ext4"
+	NTFS FSType = "ntfs"
+)
 
 var diskCLIHandlers = []minicli.Handler{
 	{ // disk
@@ -72,6 +83,11 @@ You may also specify that there is no partition on the disk, if your filesystem
 was directly written to the disk (this is highly unusual):
 
 	disk inject partitionless_disk.qc2:none files /miniccc:/miniccc
+
+To choose a File System Type specify the fstype flag, the default is EXT4:
+
+	(LVM) disk inject linux_mccc.qc2:<volumegroup>:<logical volume> fstype LVM files "miniccc":"Program Files/miniccc"
+	(ZFS) disk inject linux_mccc.qc2:<partition>:<zpool name> fstype ZFS files "miniccc":"Program Files/miniccc"
 
 You can optionally specify mount arguments to use with inject. Multiple options
 should be quoted. For example:
@@ -157,7 +173,7 @@ func diskCreate(format, dst, size string) error {
 // diskInject injects files into a disk image. dst/partition specify the image
 // and the partition number, pairs is the dst, src filepaths. options can be
 // used to supply mount arguments.
-func diskInject(dst, partition string, pairs map[string]string, options []string) error {
+func diskInject(dst, partition string, fstype string, pairs map[string]string, options []string) error {
 	// Load nbd
 	if err := nbd.Modprobe(); err != nil {
 		return err
@@ -223,31 +239,98 @@ func diskInject(dst, partition string, pairs map[string]string, options []string
 
 			partition = "1"
 		}
+	}
+
+	var volumeGroup string
+	var logicalVolume string
+
+	// determine file system type and provide mount arguments accordingly
+	switch fstype := runtime.GOOS; FSType(fstype) {
+	case LVM:
+
+		// the format is <volume group>:<logical volume>
+		partitionSplit := strings.Split(partition, ":")
+
+		if len(partitionSplit) == 2 {
+			volumeGroup = partitionSplit[0]
+			logicalVolume = partitionSplit[1]
+		} else {
+			log.Error("failed to determine LVM. can not find volume group,logical volume.")
+			return fmt.Errorf("failed to determine LVM.")
+		}
+
+		// scan for existing lvms and check for the one provided
+		vgscan, err := processWrapper("vgscan")
+		if err != nil {
+			log.Error("failed to mount LVM. vgscan does not exist")
+			return fmt.Errorf("failed to mount LVM. %s", err)
+		}
+
+		if vgscan == "" || !strings.Contains(vgscan, volumeGroup) {
+			log.Error("failed to mount LVM. volume group specified does not exist")
+			return fmt.Errorf("failed to mount LVM. volume group specified does not exist")
+		}
+
+		// activate the volume group so it can be mounted
+		_, err = processWrapper("vgchange", "-ay", volumeGroup)
+
+		if err != nil {
+			log.Error("failed to mount LVM. failed to activate volume group")
+			return fmt.Errorf("failed to mount LVM. failed to activate volume group %s", err)
+		}
+
+		// update the path to the disk image to mount
+		path = fmt.Sprintf("/dev/%s/%s", volumeGroup, logicalVolume)
+
+		args := []string{"mount"}
+		if len(options) != 0 {
+			args = append(args, options...)
+			args = append(args, path, mntDir)
+		} else {
+			args = []string{"mount", "-w", path, mntDir}
+		}
+		log.Debug("mount args: %v", args)
+
+		_, err = processWrapper(args...)
+
+	case ZFS:
+		// the format is <physical partition number>:<zpool name>
+
+		partitionSplit := strings.Split(partition, ":")
+		zpool := ""
+		if len(partitionSplit) == 2 {
+			partition = partitionSplit[0]
+			zpool = partitionSplit[1]
+
+		} else {
+			log.Error("failed to determine partition. format was incorrect - <physical partition number>:<zpool name>")
+			return fmt.Errorf("failed to determine partition.")
+		}
 
 		path = nbdPath + "p" + partition
 
-		// check desired partition exists
 		_, err = os.Stat(path)
 		if err != nil {
 			return fmt.Errorf("[image %s] desired partition %s not found", dst, partition)
 		} else {
 			log.Info("desired partition %s found in image %s", partition, dst)
 		}
-	}
 
-	// we use mount(8), because the mount syscall (mount(2)) requires we
-	// populate the fstype field, which we don't know
-	args := []string{"mount"}
-	if len(options) != 0 {
-		args = append(args, options...)
-		args = append(args, path, mntDir)
-	} else {
-		args = []string{"mount", "-w", path, mntDir}
-	}
-	log.Debug("mount args: %v", args)
+		/*
+		 use zpool over mount for zfs
+		 zpool import by itself lists available pools
+		 zpool import <pool name> will then import(mount) the pool
+		 Ensure using the -R flag to specify where the root of the pool goes
+		 Also use the -d flag to specify the directory/drive to search for the pool
+		*/
 
-	_, err = processWrapper(args...)
-	if err != nil {
+		args := []string{"zpool", "import"}
+		args = append(args, zpool, fmt.Sprintf("-R %s", mntDir), fmt.Sprintf("-d %s", path), "-f")
+
+	case NTFS:
+
+		path = nbdPath + "p" + partition
+
 		// check that ntfs-3g is installed
 		_, err = processWrapper("ntfs-3g", "--version")
 		if err != nil {
@@ -260,12 +343,52 @@ func diskInject(dst, partition string, pairs map[string]string, options []string
 			log.Error("failed to mount partition")
 			return fmt.Errorf("[image %s] %v: %v", dst, out, err)
 		}
-	}
-	defer func() {
-		if err := syscall.Unmount(mntDir, 0); err != nil {
-			log.Error("unmount failed: %v", err)
+
+	default:
+
+		path = nbdPath + "p" + partition
+
+		args := []string{"mount"}
+		if len(options) != 0 {
+			args = append(args, options...)
+			args = append(args, path, mntDir)
+		} else {
+			args = []string{"mount", "-w", path, mntDir}
 		}
+		log.Debug("mount args: %v", args)
+
+		out, err := processWrapper(args...)
+
+		if err != nil {
+			log.Error("failed to mount partition")
+			return fmt.Errorf("[image %s] %v: %v", dst, out, err)
+		}
+	}
+
+	// unmount the image from the temporary mount point
+	defer func() {
+
+		if FSType(fstype) == ZFS {
+			if _, err := processWrapper("zpool", "export", "-f"); err != nil {
+				log.Error("unmount failed: %v", err)
+			}
+		} else {
+			if err := syscall.Unmount(mntDir, 0); err != nil {
+				log.Error("unmount failed: %v", err)
+			}
+		}
+
 	}()
+
+	if FSType(fstype) == LVM {
+		// deactivate the volume group
+		defer func() {
+			_, err = processWrapper("vgchange", "-an", volumeGroup)
+			if err != nil {
+				log.Error("volume group deactivation failed: %v", err)
+			}
+		}()
+	}
 
 	// copy files/folders into mntDir
 	for dst, src := range pairs {
@@ -315,6 +438,7 @@ func parseInjectPairs(files []string) (map[string]string, error) {
 
 func cliDisk(ns *Namespace, c *minicli.Command, resp *minicli.Response) error {
 	image := filepath.Clean(c.StringArgs["image"])
+	fstype := c.StringArgs["fstype"]
 
 	// Ensure that relative paths are always relative to /files/
 	if !filepath.IsAbs(image) {
@@ -347,11 +471,11 @@ func cliDisk(ns *Namespace, c *minicli.Command, resp *minicli.Response) error {
 
 		if strings.Contains(image, ":") {
 			parts := strings.Split(image, ":")
-			if len(parts) != 2 {
+			if len(parts) < 2 || len(parts) > 3 {
 				return errors.New("found way too many ':'s, expected <path/to/image>:<partition>")
 			}
 
-			image, partition = parts[0], parts[1]
+			image, partition = parts[0], strings.Join(parts[1:], ":")
 		}
 
 		options := fieldsQuoteEscape("\"", c.StringArgs["options"])
@@ -362,7 +486,7 @@ func cliDisk(ns *Namespace, c *minicli.Command, resp *minicli.Response) error {
 			return err
 		}
 
-		return diskInject(image, partition, pairs, options)
+		return diskInject(image, partition, fstype, pairs, options)
 	} else if c.BoolArgs["create"] {
 		size := c.StringArgs["size"]
 
