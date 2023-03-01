@@ -12,7 +12,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -102,6 +101,8 @@ be in the files directory.`,
 			"disk <snapshot,> <image> [dst image]",
 			"disk <inject,> <image> files <files like /path/to/src:/path/to/dst>...",
 			"disk <inject,> <image> options <options> files <files like /path/to/src:/path/to/dst>...",
+			"disk <inject,> <image> options <options> fstype <fstype> files <files like /path/to/src:/path/to/dst>...",
+			"disk <inject,> <image> fstype <fstype> files <files like /path/to/src:/path/to/dst>...",
 			"disk <info,> <image>",
 		},
 		Call: wrapSimpleCLI(cliDisk),
@@ -245,7 +246,7 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 	var logicalVolume string
 
 	// determine file system type and provide mount arguments accordingly
-	switch fstype := runtime.GOOS; FSType(fstype) {
+	switch FSType(fstype) {
 	case LVM:
 
 		// the format is <volume group>:<logical volume>
@@ -272,7 +273,9 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		}
 
 		// activate the volume group so it can be mounted
-		_, err = processWrapper("vgchange", "-ay", volumeGroup)
+		vgchange, err := processWrapper("vgchange", "-ay", volumeGroup)
+
+		fmt.Println(vgchange)
 
 		if err != nil {
 			log.Error("failed to mount LVM. failed to activate volume group")
@@ -365,8 +368,29 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		}
 	}
 
+	defer func() {
+		if FSType(fstype) == LVM {
+			fmt.Println("deactivate the volume group")
+			// deactivate the volume group
+
+			out, err := processWrapper("lvchange", "-an", fmt.Sprintf("%s/%s", volumeGroup, logicalVolume))
+			fmt.Println(out)
+			if err != nil {
+				log.Error("logical volume deactivation failed: %v", err)
+			}
+
+			out, err = processWrapper("vgchange", "-an", volumeGroup)
+			fmt.Println(out)
+			if err != nil {
+				log.Error("volume group deactivation failed: %v", err)
+			}
+		}
+	}()
+
 	// unmount the image from the temporary mount point
 	defer func() {
+
+		fmt.Println("Unmounting Image")
 
 		if FSType(fstype) == ZFS {
 			if _, err := processWrapper("zpool", "export", "-f"); err != nil {
@@ -379,16 +403,6 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		}
 
 	}()
-
-	if FSType(fstype) == LVM {
-		// deactivate the volume group
-		defer func() {
-			_, err = processWrapper("vgchange", "-an", volumeGroup)
-			if err != nil {
-				log.Error("volume group deactivation failed: %v", err)
-			}
-		}()
-	}
 
 	// copy files/folders into mntDir
 	for dst, src := range pairs {
