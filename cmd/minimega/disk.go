@@ -401,7 +401,6 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 				log.Error("unmount failed: %v", err)
 			}
 		}
-
 	}()
 
 	// copy files/folders into mntDir
