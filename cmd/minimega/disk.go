@@ -327,8 +327,27 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		 Also use the -d flag to specify the directory/drive to search for the pool
 		*/
 
+		zpool_scan, err := processWrapper("zpool", "import")
+
+		if !strings.Contains(zpool_scan, zpool) || err != nil {
+			return fmt.Errorf("[image %s] desired zpool %s not found", dst, zpool)
+		}
+
 		args := []string{"zpool", "import"}
-		args = append(args, zpool, fmt.Sprintf("-R %s", mntDir), fmt.Sprintf("-d %s", path), "-f")
+		args = append(args, zpool, "-R", mntDir, "-d", path)
+
+		out, err := processWrapper(args...)
+
+		if err != nil {
+			log.Error("failed to mount partition")
+			return fmt.Errorf("[image %s] %v: %v", dst, out, err)
+		}
+
+		defer func() {
+			if _, err := processWrapper("zpool", "export", "-f", zpool); err != nil {
+				log.Error("unmount failed: %v", err)
+			}
+		}()
 
 	case NTFS:
 
@@ -389,14 +408,9 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 
 	// unmount the image from the temporary mount point
 	defer func() {
+		if FSType(fstype) != ZFS {
+			fmt.Println("Unmounting Image")
 
-		fmt.Println("Unmounting Image")
-
-		if FSType(fstype) == ZFS {
-			if _, err := processWrapper("zpool", "export", "-f"); err != nil {
-				log.Error("unmount failed: %v", err)
-			}
-		} else {
 			if err := syscall.Unmount(mntDir, 0); err != nil {
 				log.Error("unmount failed: %v", err)
 			}
