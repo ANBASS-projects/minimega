@@ -44,6 +44,8 @@ var externalDependencies = map[string]bool{
 	"ovs-vsctl": true, // used in external.go
 	"taskset":   true, // used in optimize.go
 	"tar":       true, // used in cli.go
+	"vgscan":    true, // used in disk.go
+	"zpool":     true, // used in disk.go
 }
 
 func init() {

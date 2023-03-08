@@ -1,3 +1,5 @@
 disk inject /home/abass/Ubuntu-LVM.qcow2:ubuntu-vg:ubuntu-lv fstype "lvm" files /home/abass/surfshark-install.sh:/home/ubuntu/test1.sh
 
 disk inject /home/abass/Ubuntu-ZFS.qcow2:7:rpool fstype "zfs" files /home/abass/surfshark-install.sh:/home/ubuntu/test1.sh
+
+disk inject /home/abass/Ubuntu-ZFS.qcow2:rpool fstype "zfs" files /home/abass/surfshark-install.sh:/home/ubuntu/test1.sh
