@@ -204,7 +204,7 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		}
 	}()
 
-	path := nbdPath
+	devPath := nbdPath
 
 	f, err := os.Open(nbdPath)
 	if err != nil {
@@ -243,11 +243,12 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 			partition = "1"
 		}
 
-		path = nbdPath + "p" + partition
+		devPath = nbdPath + "p" + partition
 	}
 
 	var volumeGroup string
 	var logicalVolume string
+	var zpool string
 
 	// determine file system type and provide mount arguments accordingly
 	switch FSType(fstype) {
@@ -285,14 +286,14 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		}
 
 		// update the path to the disk image to mount
-		path = fmt.Sprintf("/dev/%s/%s", volumeGroup, logicalVolume)
+		devPath = fmt.Sprintf("/dev/%s/%s", volumeGroup, logicalVolume)
 
 		args := []string{"mount"}
 		if len(options) != 0 {
 			args = append(args, options...)
-			args = append(args, path, mntDir)
+			args = append(args, devPath, mntDir)
 		} else {
-			args = []string{"mount", "-w", path, mntDir}
+			args = []string{"mount", "-w", devPath, mntDir}
 		}
 		log.Debug("mount args: %v", args)
 
@@ -301,9 +302,9 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 	case ZFS:
 		// the format is <physical partition number>:<zpool name>
 		var parse bool
-
+		zpool = ""
 		partitionSplit := strings.Split(partition, ":")
-		zpool := ""
+
 		if len(partitionSplit) == 2 {
 			partition = partitionSplit[0]
 			zpool = partitionSplit[1]
@@ -340,15 +341,15 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 				line := zpool_scan_split[i]
 				if strings.Contains(line, zpool) && strings.Contains(line, "ONLINE") {
 					device := strings.Fields(zpool_scan_split[i+1])[0]
-					path = fmt.Sprintf("/dev/%s", device)
+					devPath = fmt.Sprintf("/dev/%s", device)
 					break
 				}
 			}
 		} else {
-			path = nbdPath + "p" + partition
+			devPath = nbdPath + "p" + partition
 		}
 
-		_, err = os.Stat(path)
+		_, err = os.Stat(devPath)
 		if err != nil {
 			return fmt.Errorf("[image %s] desired partition %s not found", dst, partition)
 		} else {
@@ -356,7 +357,7 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		}
 
 		args := []string{"zpool", "import"}
-		args = append(args, zpool, "-R", mntDir, "-d", path, "-f")
+		args = append(args, zpool, "-R", mntDir, "-d", devPath, "-f")
 
 		out, err := processWrapper(args...)
 
@@ -366,11 +367,6 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		}
 
 		// export (unmount) the zpool from the system so the drive can be disconnected
-		defer func() {
-			if _, err := processWrapper("zpool", "export", "-f", zpool); err != nil {
-				log.Error("unmount failed: %v", err)
-			}
-		}()
 
 	case NTFS:
 
@@ -381,7 +377,7 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		}
 
 		// mount with ntfs-3g
-		out, err := processWrapper("mount", "-o", "ntfs-3g", path, mntDir)
+		out, err := processWrapper("mount", "-o", "ntfs-3g", devPath, mntDir)
 		if err != nil {
 			log.Error("failed to mount partition")
 			return fmt.Errorf("[image %s] %v: %v", dst, out, err)
@@ -392,9 +388,9 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		args := []string{"mount"}
 		if len(options) != 0 {
 			args = append(args, options...)
-			args = append(args, path, mntDir)
+			args = append(args, devPath, mntDir)
 		} else {
-			args = []string{"mount", "-w", path, mntDir}
+			args = []string{"mount", "-w", devPath, mntDir}
 		}
 		log.Debug("mount args: %v", args)
 
@@ -406,7 +402,7 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 		}
 	}
 
-	defer func() {
+	defer func() error {
 		if FSType(fstype) == LVM {
 			// deactivate the logical volume
 			out, err := processWrapper("lvchange", "-an", fmt.Sprintf("%s/%s", volumeGroup, logicalVolume))
@@ -421,7 +417,23 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 			if err != nil {
 				log.Error("volume group deactivation failed: %v", err)
 			}
+		} else if FSType(fstype) == ZFS {
+			if _, err := processWrapper("zpool", "export", "-f", zpool); err != nil {
+				return fmt.Errorf("There was an error while exporting ZFS pool: %v", err)
+			}
+
+			dir, err := ioutil.ReadDir(mntDir)
+
+			if err == nil {
+				for _, d := range dir {
+					os.RemoveAll(path.Join([]string{mntDir, d.Name()}...))
+				}
+			} else {
+				return fmt.Errorf("Could not erase zfs contents left behind: %v", err)
+			}
 		}
+
+		return nil
 	}()
 
 	// unmount the image from the temporary mount point
@@ -447,7 +459,7 @@ func diskInject(dst, partition string, fstype string, pairs map[string]string, o
 	}
 
 	// explicitly flush buffers
-	out, err := processWrapper("blockdev", "--flushbufs", path)
+	out, err := processWrapper("blockdev", "--flushbufs", devPath)
 	if err != nil {
 		return fmt.Errorf("[image %s] unable to flush: %v %v", dst, out, err)
 	}

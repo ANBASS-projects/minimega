@@ -2,4 +2,6 @@ disk inject /home/abass/Ubuntu-LVM.qcow2:ubuntu-vg:ubuntu-lv fstype "lvm" files 
 
 disk inject /home/abass/Ubuntu-ZFS.qcow2:7:rpool fstype "zfs" files /home/abass/surfshark-install.sh:/home/ubuntu/test1.sh
 
-disk inject /home/abass/Ubuntu-ZFS.qcow2:rpool fstype "zfs" files /home/abass/surfshark-install.sh:/home/ubuntu/test1.sh
+disk inject /home/abass/Downloads/solaris.qcow2:rpool fstype "zfs" files /home/abass/Downloads/Oracle/:/export/home/oracle/Desktop/Oracle
+
+disk inject /home/abass/vm-106-disk-0.qcow2:3:pfSense fstype "zfs" files /home/abass/surfshark-install.sh:/test.sh
